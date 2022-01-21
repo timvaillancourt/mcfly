@@ -4,33 +4,19 @@ import (
 	"encoding/json"
 	"io"
 	"io/ioutil"
-	"os"
+	//"os"
 	"testing"
 
 	"github.com/satori/go.uuid"
 	"github.com/stretchr/testify/assert"
 )
 
-func TestNextReverseIndexPoint(t *testing.T) {
-	store := &Store{
-		indexPoints: []indexPoint{
-			{0, 10},
-			{10, 20},
-			{30, 40},
-		},
-	}
-	point, found := store.nextReverseIndexPoint()
-	assert.True(t, found)
-	assert.Equal(t, indexPoint{30, 40}, point)
-	assert.Equal(t, []indexPoint{{0, 10}, {10, 20}}, store.indexPoints)
-}
-
 func TestStoreWriteAndRead(t *testing.T) {
 	tmpFile, err := ioutil.TempFile("", t.Name())
 	if err != nil {
 		t.Fatalf("failed to create tmp file: %v", err)
 	}
-	defer os.Remove(tmpFile.Name())
+	//defer os.Remove(tmpFile.Name())
 
 	store, err := NewFileStore(tmpFile.Name())
 	assert.Nil(t, err)
@@ -49,7 +35,6 @@ func TestStoreWriteAndRead(t *testing.T) {
 	assert.Nil(t, err)
 	assert.Equal(t, 91, n)
 	assert.Equal(t, int64(91), store.offset)
-	assert.Equal(t, []indexPoint{{0, 91}}, store.indexPoints)
 
 	// event 2: test an event larger the json.Decoder 512 byte buffer (eg: test unread buffer)
 	gtid2, _ := uuid.FromString("72bedaed-a21f-11ea-b27c-0242c0a8d005")
@@ -76,7 +61,6 @@ func TestStoreWriteAndRead(t *testing.T) {
 	assert.Nil(t, err)
 	assert.Equal(t, 585, n)
 	assert.Equal(t, int64(676), store.offset)
-	assert.Equal(t, []indexPoint{{0, 91}, {91, 585}}, store.indexPoints)
 
 	// read and test events
 	expect := []Event{event2, event1}
@@ -95,6 +79,5 @@ func TestStoreWriteAndRead(t *testing.T) {
 		i += 1
 	}
 
-	assert.Len(t, store.indexPoints, 0)
 	assert.Equal(t, int64(0), store.offset)
 }

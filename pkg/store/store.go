@@ -2,82 +2,108 @@ package store
 
 import (
 	"bytes"
-	"io"
+	"encoding/binary"
+	"errors"
+	"log"
 	"os"
 	"sync"
 )
 
-type indexPoint struct {
-	Offset int64
-	Bytes  int
-}
-
-type Store struct {
+type FileStore struct {
 	sync.Mutex
-	data        *os.File
-	offset      int64
-	indexPoints []indexPoint
-	unreadBuf   *bytes.Buffer
+	file      *os.File
+	offset    int64
+	unreadBuf *bytes.Buffer
 }
 
-func NewFileStore(dataFile string) (*Store, error) {
-	store, err := os.Create(dataFile)
+type FileStoreHeader struct {
+	Offset int64
+	Length int64
+}
+
+func NewFileStore(dataFile string) (*FileStore, error) {
+	f, err := os.OpenFile(dataFile, os.O_RDWR|os.O_CREATE, 0644)
 	if err != nil {
 		return nil, err
 	}
 
-	return &Store{
-		data:        store,
-		indexPoints: make([]indexPoint, 0),
-		unreadBuf:   &bytes.Buffer{},
-	}, nil
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("NewFileStore: opened file %q with length %d", dataFile, info.Size())
+
+	return &FileStore{
+		file:      f,
+		offset:    info.Size(),
+		unreadBuf: &bytes.Buffer{},
+	}, err
 }
 
-func (s *Store) Close() {
-	if s.data != nil {
-		s.data.Close()
+func (fs *FileStore) Close() {
+	if fs.file != nil {
+		fs.file.Close()
 	}
 }
 
-func (s *Store) nextReverseIndexPoint() (point indexPoint, found bool) {
-	indexPointsLen := len(s.indexPoints)
-	if indexPointsLen > 0 {
-		point = s.indexPoints[indexPointsLen-1]
-		if indexPointsLen == 0 {
-			s.indexPoints = []indexPoint{}
-		} else {
-			s.indexPoints = s.indexPoints[:indexPointsLen-1]
-		}
-		found = true
-	}
-	return point, found
+func (fs *FileStore) writeHeader(written int) error {
+	return binary.Write(fs.file, binary.LittleEndian, int64(written))
 }
 
-func (s *Store) Write(p []byte) (n int, err error) {
-	s.Lock()
-	defer s.Unlock()
+func (fs *FileStore) readNextHeader() (header FileStoreHeader, err error) {
+	if fs.offset <= binary.MaxVarintLen64 {
+		return header, errors.New("invalid length")
+	}
 
-	n, err = s.data.Write(p)
+	//data := make([]byte, binary.MaxVarintLen64)
+	var dataLength int64
+	readOffset := fs.offset - binary.MaxVarintLen64
+	log.Printf("readNextHeader: scanning from offset %d to %d", fs.offset, readOffset)
+	//if _, err = fs.file.ReadAt(data, readOffset); err != nil {
+	//	return header, err
+	//}
+	if _, err = fs.file.Seek(readOffset, 0); err != nil {
+		return header, err
+	}
+	if err = binary.Read(fs.file, binary.LittleEndian, &dataLength); err != nil {
+		return header, err
+	}
+	log.Printf("readNextHeader: got data length %d", dataLength)
+
+	//length, n := binary.Varint(data)
+	//if n != len(data) {
+	//	return header, errors.New("invalid header")
+	//}
+
+	return FileStoreHeader{
+		Length: dataLength,
+		Offset: readOffset - dataLength,
+	}, err
+}
+
+func (fs *FileStore) Write(p []byte) (n int, err error) {
+	fs.Lock()
+	defer fs.Unlock()
+
+	n, err = fs.file.Write(p)
 	if err != nil {
 		return n, err
 	}
 
-	s.indexPoints = append(s.indexPoints, indexPoint{
-		Offset: s.offset,
-		Bytes:  n,
-	})
-	s.offset += int64(n)
-
+	if err = fs.writeHeader(n); err != nil {
+		return n, err
+	}
+	fs.offset += int64(n + binary.MaxVarintLen64)
 	return n, err
 }
 
-func (s *Store) Read(p []byte) (n int, err error) {
-	s.Lock()
-	defer s.Unlock()
+func (fs *FileStore) Read(p []byte) (n int, err error) {
+	fs.Lock()
+	defer fs.Unlock()
 
 	// empty unread buffer
-	for s.unreadBuf.Len() > 0 {
-		b, err := s.unreadBuf.ReadByte()
+	for fs.unreadBuf.Len() > 0 {
+		b, err := fs.unreadBuf.ReadByte()
 		if err != nil {
 			return n, err
 		}
@@ -89,23 +115,19 @@ func (s *Store) Read(p []byte) (n int, err error) {
 		}
 	}
 
-	// get next reverse index point or return EOF if none exist
-	indexPoint, found := s.nextReverseIndexPoint()
-	if !found {
-		return n, io.EOF
-	}
-	s.offset = indexPoint.Offset
-	_, err = s.data.Seek(s.offset, 0)
+	// get next header
+	header, err := fs.readNextHeader()
 	if err != nil {
 		return n, err
 	}
 
-	// read bytes from index point
-	bytes := make([]byte, indexPoint.Bytes)
-	_, err = s.data.Read(bytes)
+	// read bytes
+	bytes := make([]byte, header.Length)
+	_, err = fs.file.ReadAt(bytes, header.Offset)
 	if err != nil {
 		return n, err
 	}
+	fs.offset = header.Offset
 
 	// copy 'bytes' -> 'p' or write to unread buffer if 'p' is full
 	var i int
@@ -114,7 +136,7 @@ func (s *Store) Read(p []byte) (n int, err error) {
 			p[n] = bytes[i]
 			n += 1
 		} else {
-			s.unreadBuf.Write([]byte{bytes[i]})
+			fs.unreadBuf.Write([]byte{bytes[i]})
 		}
 		i += 1
 	}

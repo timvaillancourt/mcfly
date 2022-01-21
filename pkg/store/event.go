@@ -15,11 +15,11 @@ type Event struct {
 }
 
 type EventStore struct {
-	store *Store
+	store *FileStore
 }
 
-func NewEventStore(store *Store) *EventStore {
-	return &EventStore{store}
+func NewEventStore(fs *FileStore) *EventStore {
+	return &EventStore{fs}
 }
 
 func (es *EventStore) Close() {
