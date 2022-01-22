@@ -3,7 +3,7 @@ package store
 import (
 	"bytes"
 	"encoding/binary"
-	"errors"
+	"io"
 	"log"
 	"os"
 	"sync"
@@ -13,6 +13,7 @@ type FileStore struct {
 	sync.Mutex
 	file      *os.File
 	offset    int64
+	maxOffset int64
 	unreadBuf *bytes.Buffer
 }
 
@@ -36,6 +37,7 @@ func NewFileStore(dataFile string) (*FileStore, error) {
 	return &FileStore{
 		file:      f,
 		offset:    info.Size(),
+		maxOffset: info.Size(),
 		unreadBuf: &bytes.Buffer{},
 	}, err
 }
@@ -46,38 +48,45 @@ func (fs *FileStore) Close() {
 	}
 }
 
+func (fs *FileStore) incrOffset(increment int64) {
+	fs.offset += increment
+	if fs.offset > fs.maxOffset {
+		fs.maxOffset = fs.offset
+	}
+}
+
 func (fs *FileStore) writeHeader(written int) error {
-	return binary.Write(fs.file, binary.LittleEndian, int64(written))
+	log.Printf("writeHeader: append %d to file", written)
+	if err := binary.Write(fs.file, binary.LittleEndian, uint64(written)); err != nil {
+		return err
+	}
+	fs.incrOffset(binary.MaxVarintLen64)
+	return nil
 }
 
 func (fs *FileStore) readNextHeader() (header FileStoreHeader, err error) {
-	if fs.offset <= binary.MaxVarintLen64 {
-		return header, errors.New("invalid length")
-	}
-
-	//data := make([]byte, binary.MaxVarintLen64)
-	var dataLength int64
-	readOffset := fs.offset - binary.MaxVarintLen64
-	log.Printf("readNextHeader: scanning from offset %d to %d", fs.offset, readOffset)
-	//if _, err = fs.file.ReadAt(data, readOffset); err != nil {
-	//	return header, err
+	//if fs.maxOffset < binary.MaxVarintLen64 {
+	//	return header, io.EOF
 	//}
+
+	readOffset := fs.offset - binary.MaxVarintLen64
+	if readOffset < 0 {
+		return header, io.EOF
+	}
+	log.Printf("readNextHeader: scanning to offset %d from %d", readOffset, fs.offset)
+
+	var dataLength uint64
 	if _, err = fs.file.Seek(readOffset, 0); err != nil {
 		return header, err
 	}
 	if err = binary.Read(fs.file, binary.LittleEndian, &dataLength); err != nil {
 		return header, err
 	}
-	log.Printf("readNextHeader: got data length %d", dataLength)
-
-	//length, n := binary.Varint(data)
-	//if n != len(data) {
-	//	return header, errors.New("invalid header")
-	//}
+	log.Printf("readNextHeader: got data length %d from header", dataLength)
 
 	return FileStoreHeader{
-		Length: dataLength,
-		Offset: readOffset - dataLength,
+		Length: int64(dataLength),
+		Offset: readOffset - int64(dataLength),
 	}, err
 }
 
@@ -89,11 +98,11 @@ func (fs *FileStore) Write(p []byte) (n int, err error) {
 	if err != nil {
 		return n, err
 	}
+	fs.incrOffset(int64(n))
 
 	if err = fs.writeHeader(n); err != nil {
 		return n, err
 	}
-	fs.offset += int64(n + binary.MaxVarintLen64)
 	return n, err
 }
 
@@ -123,7 +132,7 @@ func (fs *FileStore) Read(p []byte) (n int, err error) {
 
 	// read bytes
 	bytes := make([]byte, header.Length)
-	_, err = fs.file.ReadAt(bytes, header.Offset)
+	_, err = fs.file.ReadAt(bytes, int64(header.Offset))
 	if err != nil {
 		return n, err
 	}
