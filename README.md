@@ -1,5 +1,7 @@
 # mcfly
 
+**NOTE: this is a partially-working proof of concept**
+
 mcfly is a tool for rewinding MySQL changes via the binlog
 
 
